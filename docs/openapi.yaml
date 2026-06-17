@@ -1,0 +1,553 @@
+openapi: 3.1.0
+info:
+  title: Sumeria Collection Agent API
+  description: |
+    API del Agente de Cobranza Autónomo de Sumeria.
+    Gestiona la retención automática (holdback) sobre el flujo transaccional
+    de comercios morosos, en nombre de instituciones financieras.
+
+    **Autenticación**: Bearer token (Laravel Sanctum) por institución financiera.
+    Header requerido: `Authorization: Bearer {token}`
+
+    **Roles**:
+    - `sumeria-admin`: acceso a endpoints `/admin` (gestión de lenders)
+    - `lender`: acceso a todos los demás endpoints (self-service por institución)
+  version: 1.0.0
+  contact:
+    name: Sumeria Engineering
+    email: tech@sumeria.io
+
+servers:
+  - url: http://localhost:8000/api
+    description: Desarrollo local
+  - url: https://collection.sumeria.io/api
+    description: Producción
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Admin - Lenders
+    description: Gestión de instituciones financieras (solo Sumeria admin)
+  - name: Policy Engine
+    description: Configuración de límites de holdback por institución
+  - name: Holdback Mandates
+    description: Mandatos de retención automática autorizados al originar un préstamo
+  - name: Collection Cases
+    description: Ciclo de vida de un caso de cobranza
+  - name: Shadow Review
+    description: Revisión humana de recomendaciones del Decision Engine (modo piloto)
+  - name: Exception Requests
+    description: Solicitudes de excepción del comercio (evaluadas por LLM)
+
+paths:
+
+  # -----------------------------------------------------------------------
+  # ADMIN
+  # -----------------------------------------------------------------------
+
+  /v1/admin/lenders:
+    get:
+      tags: [Admin - Lenders]
+      summary: Listar instituciones financieras
+      responses:
+        '200':
+          description: Lista de lenders activos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lender'
+
+    post:
+      tags: [Admin - Lenders]
+      summary: Crear nueva institución financiera
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LenderCreate'
+      responses:
+        '201':
+          description: Lender creado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lender_id: { type: integer }
+                  slug: { type: string }
+                  message: { type: string }
+
+  /v1/admin/lenders/{lender_id}/tokens:
+    post:
+      tags: [Admin - Lenders]
+      summary: Emitir API token para un lender
+      description: El token solo se muestra una vez — no se puede recuperar.
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token_name]
+              properties:
+                token_name: { type: string, example: produccion-v1 }
+      responses:
+        '201':
+          description: Token generado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  lender_id: { type: integer }
+                  warning: { type: string }
+
+  /v1/admin/lenders/{lender_id}/webhook:
+    put:
+      tags: [Admin - Lenders]
+      summary: Configurar webhook del lender
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookConfig'
+      responses:
+        '200':
+          description: Webhook configurado
+
+  # -----------------------------------------------------------------------
+  # POLICY ENGINE
+  # -----------------------------------------------------------------------
+
+  /v1/lenders/{lender_id}/negotiation-policy:
+    post:
+      tags: [Policy Engine]
+      summary: Crear o actualizar política de holdback
+      description: |
+        Define los límites de retención para la institución financiera.
+        Si ya existe una política, la reemplaza.
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NegotiationPolicyCreate'
+            example:
+              min_holdback_pct: 0.05
+              max_holdback_pct: 0.20
+              max_default_rate: 0.015
+              max_recovery_extension_days: 90
+              max_exception_requests: 3
+              min_recovery_threshold: 0.40
+              contact_hours_start: "09:00"
+              contact_hours_end: "20:00"
+              jurisdiction: UY
+      responses:
+        '201':
+          description: Política creada/actualizada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy_id: { type: integer }
+
+    get:
+      tags: [Policy Engine]
+      summary: Consultar política activa
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      responses:
+        '200':
+          description: Política activa del lender
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NegotiationPolicy'
+
+  # -----------------------------------------------------------------------
+  # HOLDBACK MANDATES
+  # -----------------------------------------------------------------------
+
+  /v1/lenders/{lender_id}/holdback-mandates:
+    post:
+      tags: [Holdback Mandates]
+      summary: Registrar mandato de holdback
+      description: |
+        Se llama al originar cada préstamo, no al detectar mora.
+        El mandato es el consentimiento pre-autorizado del comercio para que
+        Sumeria retenga un % de sus ventas en caso de mora.
+        Sin mandato activo no puede activarse ningún holdback.
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HoldbackMandateCreate'
+            example:
+              merchant_id: 4521
+              loan_id: 7710
+              authorized_max_holdback_pct: 0.20
+              payment_channels: [mercadopago, pos_x]
+              contract_clause_ref: anexo-3.2
+              signed_at: "2026-01-15T10:00:00Z"
+      responses:
+        '201':
+          description: Mandato registrado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mandate_id: { type: integer }
+
+  # -----------------------------------------------------------------------
+  # COLLECTION CASES
+  # -----------------------------------------------------------------------
+
+  /v1/collection-cases:
+    post:
+      tags: [Collection Cases]
+      summary: Detectar mora y abrir caso (webhook desde scoring)
+      description: |
+        Llamado por el pipeline de scoring de Sumeria cuando detecta un atraso.
+        Valida que exista mandato activo y política configurada, crea el caso,
+        y despacha el Decision Engine de forma asincrónica.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectionCaseCreate'
+            example:
+              merchant_id: 4521
+              lender_id: 17
+              loan_id: 7710
+              amount_due: 85000.00
+              days_overdue: 7
+              score_at_detection: 612
+      responses:
+        '201':
+          description: Caso creado, Decision Engine en proceso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case_id: { type: integer }
+                  status: { type: string, example: detected }
+        '422':
+          description: No existe mandato activo o política para el lender
+
+  /v1/collection-cases/{case_id}:
+    get:
+      tags: [Collection Cases]
+      summary: Consultar estado de un caso
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        '200':
+          description: Estado actual del caso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionCaseStatus'
+
+  /v1/collection-cases/{case_id}/close:
+    post:
+      tags: [Collection Cases]
+      summary: Cerrar caso (deuda recuperada)
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [final_amount_recovered, closing_method]
+              properties:
+                final_amount_recovered:
+                  type: number
+                closing_method:
+                  type: string
+                  enum: [holdback, exception_agreement, manual]
+      responses:
+        '200':
+          description: Caso cerrado, holdback cancelado en pasarela
+
+  /v1/collection-cases/{case_id}/escalate:
+    post:
+      tags: [Collection Cases]
+      summary: Escalar caso a humano
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [out_of_policy, insufficient_sales_flow, high_risk_score, merchant_dispute, mandate_limit_reached]
+      responses:
+        '200':
+          description: Caso escalado, webhook del lender notificado
+
+  # -----------------------------------------------------------------------
+  # SHADOW REVIEW
+  # -----------------------------------------------------------------------
+
+  /v1/lenders/{lender_id}/shadow-reviews:
+    get:
+      tags: [Shadow Review]
+      summary: Listar casos pendientes de revisión humana
+      description: Solo disponible cuando shadow_mode=true en la política del lender.
+      parameters:
+        - $ref: '#/components/parameters/LenderId'
+      responses:
+        '200':
+          description: Lista paginada de casos con recomendación pendiente
+
+  /v1/collection-cases/{case_id}/shadow-reviews/approve:
+    post:
+      tags: [Shadow Review]
+      summary: Aprobar recomendación del Decision Engine
+      description: Activa el holdback en la pasarela o escala, según lo que calculó el motor.
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reviewed_by]
+              properties:
+                reviewed_by: { type: string, example: ana.garcia@banco.uy }
+      responses:
+        '200':
+          description: Recomendación aplicada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case_id: { type: integer }
+                  status: { type: string }
+
+  /v1/collection-cases/{case_id}/shadow-reviews/reject:
+    post:
+      tags: [Shadow Review]
+      summary: Rechazar recomendación y escalar
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reviewed_by]
+              properties:
+                reviewed_by: { type: string }
+      responses:
+        '200':
+          description: Caso escalado a humano
+
+  # -----------------------------------------------------------------------
+  # EXCEPTION REQUESTS
+  # -----------------------------------------------------------------------
+
+  /v1/collection-cases/{case_id}/exception-requests:
+    post:
+      tags: [Exception Requests]
+      summary: Solicitud de excepción del comercio
+      description: |
+        Recibe el mensaje del comercio (vía WhatsApp webhook u otro canal).
+        El LLM (Claude) evalúa la solicitud dentro de los límites del Policy Engine
+        y aprueba o escala automáticamente.
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [raw_message, channel]
+              properties:
+                raw_message:
+                  type: string
+                  example: "Esta semana las ventas bajaron mucho, ¿pueden bajar la retención?"
+                channel:
+                  type: string
+                  enum: [whatsapp, email, api]
+                merchant_phone:
+                  type: string
+                  example: "+59899123456"
+      responses:
+        '200':
+          description: Solicitud evaluada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  next_action:
+                    type: string
+                    enum: [approved_within_policy, escalated]
+                  message_to_merchant:
+                    type: string
+
+# -----------------------------------------------------------------------
+# COMPONENTES
+# -----------------------------------------------------------------------
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    LenderId:
+      name: lender_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    CaseId:
+      name: case_id
+      in: path
+      required: true
+      schema:
+        type: integer
+
+  schemas:
+
+    Lender:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        slug: { type: string }
+        jurisdiction: { type: string }
+        contact_email: { type: string }
+        active: { type: boolean }
+        onboarded_at: { type: string, format: date-time }
+
+    LenderCreate:
+      type: object
+      required: [name, slug, jurisdiction, contact_email]
+      properties:
+        name: { type: string }
+        slug: { type: string, pattern: '^[a-z0-9\-]+$' }
+        jurisdiction: { type: string, minLength: 2, maxLength: 2 }
+        contact_email: { type: string, format: email }
+
+    WebhookConfig:
+      type: object
+      properties:
+        escalation_webhook_url: { type: string, format: uri }
+        agreement_webhook_url: { type: string, format: uri }
+        webhook_secret: { type: string, minLength: 16 }
+
+    NegotiationPolicyCreate:
+      type: object
+      required:
+        - min_holdback_pct
+        - max_holdback_pct
+        - max_default_rate
+        - max_recovery_extension_days
+        - max_exception_requests
+        - min_recovery_threshold
+        - contact_hours_start
+        - contact_hours_end
+        - jurisdiction
+      properties:
+        min_holdback_pct: { type: number, minimum: 0.0001, maximum: 1 }
+        max_holdback_pct: { type: number, minimum: 0.0001, maximum: 1 }
+        max_default_rate: { type: number, minimum: 0, maximum: 1 }
+        max_recovery_extension_days: { type: integer, minimum: 1 }
+        max_exception_requests: { type: integer, minimum: 0 }
+        min_recovery_threshold: { type: number, minimum: 0, maximum: 1 }
+        contact_hours_start: { type: string, example: "09:00" }
+        contact_hours_end: { type: string, example: "20:00" }
+        jurisdiction: { type: string, minLength: 2, maxLength: 2 }
+        shadow_mode: { type: boolean, default: true }
+
+    NegotiationPolicy:
+      allOf:
+        - $ref: '#/components/schemas/NegotiationPolicyCreate'
+        - type: object
+          properties:
+            id: { type: integer }
+            lender_id: { type: integer }
+            active: { type: boolean }
+
+    HoldbackMandateCreate:
+      type: object
+      required:
+        - merchant_id
+        - loan_id
+        - authorized_max_holdback_pct
+        - payment_channels
+        - contract_clause_ref
+        - signed_at
+      properties:
+        merchant_id: { type: integer }
+        loan_id: { type: integer }
+        authorized_max_holdback_pct: { type: number, minimum: 0.0001, maximum: 1 }
+        payment_channels:
+          type: array
+          items: { type: string }
+          example: [mercadopago]
+        contract_clause_ref: { type: string }
+        signed_at: { type: string, format: date-time }
+
+    CollectionCaseCreate:
+      type: object
+      required: [merchant_id, lender_id, loan_id, amount_due, days_overdue, score_at_detection]
+      properties:
+        merchant_id: { type: integer }
+        lender_id: { type: integer }
+        loan_id: { type: integer }
+        amount_due: { type: number }
+        days_overdue: { type: integer, minimum: 1 }
+        score_at_detection: { type: integer, minimum: 0, maximum: 1000 }
+
+    CollectionCaseStatus:
+      type: object
+      properties:
+        case_id: { type: integer }
+        status:
+          type: string
+          enum:
+            - detected
+            - holdback_active
+            - holdback_adjusted
+            - exception_pending
+            - escalated
+            - closed_recovered
+            - closed_default
+        recovery_probability: { type: number, nullable: true }
+        current_holdback_pct: { type: number, nullable: true }
+        estimated_recovery_days: { type: integer, nullable: true }
