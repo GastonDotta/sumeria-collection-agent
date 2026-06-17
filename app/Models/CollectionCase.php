@@ -25,14 +25,18 @@ class CollectionCase extends Model
         'shadow_reviewed_by',
         'gateway_holdback_id',
         'gateway_provider',
+        'consecutive_floor_breach_days',
+        'last_floor_check_at',
     ];
 
     protected $casts = [
         'amount_due'            => 'decimal:2',
         'recovery_probability'  => 'decimal:4',
         'current_holdback_pct'  => 'decimal:4',
-        'shadow_recommendation' => 'array',
-        'shadow_reviewed_at'    => 'datetime',
+        'shadow_recommendation'          => 'array',
+        'shadow_reviewed_at'             => 'datetime',
+        'last_floor_check_at'            => 'datetime',
+        'consecutive_floor_breach_days'  => 'integer',
     ];
 
     public function mandate(): BelongsTo

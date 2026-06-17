@@ -12,17 +12,25 @@ class HoldbackMandate extends Model
         'lender_id',
         'loan_id',
         'authorized_max_holdback_pct',
+        'merchant_operating_floor',
         'payment_channels',
         'contract_clause_ref',
+        'legal_instrument_type',
+        'validated_by_legal',
+        'validated_by_legal_at',
+        'legal_validation_ref',
         'signed_at',
         'active',
     ];
 
     protected $casts = [
-        'payment_channels' => 'array',
+        'payment_channels'            => 'array',
         'authorized_max_holdback_pct' => 'decimal:4',
-        'signed_at' => 'datetime',
-        'active' => 'boolean',
+        'merchant_operating_floor'    => 'decimal:2',
+        'validated_by_legal'          => 'boolean',
+        'validated_by_legal_at'       => 'datetime',
+        'signed_at'                   => 'datetime',
+        'active'                      => 'boolean',
     ];
 
     public function collectionCases(): HasMany

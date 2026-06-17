@@ -62,9 +62,28 @@ class DecisionEngineService
             ];
         }
 
+        // Gap #4 — verificar que hay margen por encima del piso operativo antes de calcular
+        $operatingFloor  = (float) ($mandate->merchant_operating_floor ?? 0);
+        $availableForHoldback = $avgDailySales - $operatingFloor;
+
+        if ($availableForHoldback <= 0) {
+            return [
+                'action'               => 'escalate',
+                'recovery_probability' => $recoveryProb,
+                'holdback_pct'         => null,
+                'estimated_recovery_days' => null,
+                'escalation_reason'    => 'no_liquidity_margin',
+            ];
+        }
+
+        // El máximo efectivo considera también el piso: no podemos retener más de lo disponible
+        $maxSafePct = $availableForHoldback / $avgDailySales;
+
         $effectiveMax = min(
             (float) $policy->max_holdback_pct,
             (float) $mandate->authorized_max_holdback_pct,
+            (float) ($policy->platform_max_holdback_pct ?? 0.30),
+            $maxSafePct,
         );
 
         $holdbackPct = $this->calculateHoldbackPct(

@@ -7,6 +7,7 @@ use App\Models\HoldbackMandate;
 use App\Models\NegotiationPolicy;
 use App\Services\EscalationNotificationService;
 use App\Services\HoldbackExecutionEngine;
+use App\Services\MerchantExposureService;
 
 /**
  * Máquina de estados del caso de cobranza.
@@ -26,11 +27,12 @@ use App\Services\HoldbackExecutionEngine;
 class HoldbackOrchestratorService
 {
     public function __construct(
-        private readonly DecisionEngineService        $decisionEngine,
-        private readonly PolicyEngineService          $policyEngine,
-        private readonly AuditLogService              $auditLog,
-        private readonly HoldbackExecutionEngine      $executionEngine,
+        private readonly DecisionEngineService         $decisionEngine,
+        private readonly PolicyEngineService           $policyEngine,
+        private readonly AuditLogService               $auditLog,
+        private readonly HoldbackExecutionEngine       $executionEngine,
         private readonly EscalationNotificationService $escalationNotifier,
+        private readonly MerchantExposureService       $exposureService,
     ) {}
 
     /**
@@ -44,6 +46,9 @@ class HoldbackOrchestratorService
 
         $policy  = $this->policyEngine->getActivePolicy($case->lender_id);
         $mandate = $case->mandate;
+
+        // Gap #1 — bloquear si el mandato no tiene validación legal
+        $this->policyEngine->assertMandateLegallyValid($mandate);
 
         $recommendation = $this->decisionEngine->evaluate($case, $policy, $mandate);
 
@@ -188,6 +193,9 @@ class HoldbackOrchestratorService
         // Sprint 5-6: ejecutar retención real sobre la pasarela
         $this->executionEngine->activate($case, $holdbackPct);
 
+        // Gap #7 — recalcular exposición agregada del comercio
+        $this->exposureService->recalculate($case->merchant_id);
+
         $this->auditLog->log($case->id, 'holdback_activated', [
             'holdback_pct'            => $holdbackPct,
             'estimated_recovery_days' => $recommendation['estimated_recovery_days'],
@@ -204,6 +212,9 @@ class HoldbackOrchestratorService
         $case->update(['status' => 'escalated']);
         $case->escalation()->create(['reason' => $reason]);
         $this->auditLog->log($case->id, 'escalated', ['reason' => $reason]);
+
+        // Gap #7 — recalcular exposición al cerrar un holdback activo
+        $this->exposureService->recalculate($case->merchant_id);
 
         // Sprint 7-8: notificar al lender vía webhook/CRM
         $this->escalationNotifier->notify($case->fresh()->load('escalation'));

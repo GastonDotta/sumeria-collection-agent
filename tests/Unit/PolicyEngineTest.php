@@ -1,17 +1,21 @@
 <?php
 
 use App\Models\NegotiationPolicy;
+use App\Services\MerchantExposureService;
 use App\Services\PolicyEngineService;
 
 beforeEach(function () {
-    $this->service = new PolicyEngineService();
+    $exposure = Mockery::mock(MerchantExposureService::class);
+    $exposure->allows('getTotalActivePct')->andReturn(0.0);
+    $this->service = new PolicyEngineService($exposure);
 });
 
-function makeNegotiationPolicy(float $min, float $max): NegotiationPolicy
+function makeNegotiationPolicy(float $min, float $max, float $platformMax = 0.30): NegotiationPolicy
 {
     return new NegotiationPolicy([
-        'min_holdback_pct' => $min,
-        'max_holdback_pct' => $max,
+        'min_holdback_pct'          => $min,
+        'max_holdback_pct'          => $max,
+        'platform_max_holdback_pct' => $platformMax,
     ]);
 }
 
